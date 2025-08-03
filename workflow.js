@@ -15,7 +15,7 @@ const validateQuery = async (ctx, input) => {
   console.log("--- Activity: validateQuery ---");
   console.log("Received input:", JSON.stringify(input, null, 2));
 
-  // TODO: Add your query validation logic here.
+  // TODO: Add query validation logic here.
   // For example, check for malicious input, check length, etc.
   const response = await ai.models.generateContent({
     model: "gemini-2.5-flash",
@@ -46,7 +46,6 @@ const validateQuery = async (ctx, input) => {
     }
   });
 
-  // For now, we'll just simulate a successful validation and pass the data along.
   const validationResult = {
     originalQuery: input.query,
     cypherQry: input.cypherQry,
@@ -67,15 +66,16 @@ const generateCypher = async (ctx, input) => {
   console.log("\n--- Activity: generateCypher ---");
   console.log("Received input from previous step:", JSON.stringify(input, null, 2));
 
-  // TODO: Add your logic to call an AI model (e.g., OpenAI) to generate the Cypher query.
-    // Simulate a generated Cypher query.
+  // TODO: Add logic to call an AI model to generate the Cypher query.
+
   const generatedData = {
+    originalQry: input.cypherQry,
     generatedAt: new Date().toISOString(),
   };
-  // You will use `input.cypherQry` to send to the AI.
+
   if (input.validityCheck.is_valid_query) {
     const response = await ai.models.generateContent({
-      model: "gemini-2.5-pro",
+      model: "gemini-2.5-flash",
       contents: input.cypherQry,
       config: {
         responseMimeType: "application/json",
@@ -104,10 +104,10 @@ const generateCypher = async (ctx, input) => {
       }
     });
     generatedData.generatedCypher = JSON.parse(response.text)
-    generatedData.status = true;
+    generatedData.qryGenerated = true;
 
   } else {
-    generatedData.status = false;
+    generatedData.qryGenerated = false;
   }
 
   console.log("Returning generated Cypher query:", JSON.stringify(generatedData, null, 2));
@@ -115,7 +115,64 @@ const generateCypher = async (ctx, input) => {
 };
 
 /**
- * Activity 3: Creates an audit log of the operation.
+ * Activity 3: Determine if the user's request would be more valuable if it were augmented with data from the entire database.
+ * It receives the output from the `generateCypher` activity.
+ */
+const metaAnalysis = async (ctx, input) => {
+  console.log("\n--- Activity: metaAnalysis ---");
+  console.log("Received input from previous step:", JSON.stringify(input, null, 2));
+
+  // TODO: Add logic to call an AI model to do analysis
+
+  const metaAnalysisResult = {
+    generatedAt: new Date().toISOString(),
+  };
+  const summarized_user_query = input.query;
+  const executed_cypher = input.cypher;
+  const metaAnalysisPrompt = `
+  You are an advanced clinical data analyst AI. Your task is to analyze a user's data request and the Cypher query that fulfilled it. Your goal is to determine if the user's request would be more valuable if it were augmented with broader, comparative data from the entire database (i.e., data from all practitioners).\r\n\r\nYou will be given the user's goal, the specific Cypher query that was run, and the graph database schema.\r\n\r\n**Your Logic:**\r\n-   **When to suggest augmentation (\"should_augment: true\"):**\r\n    -   The query asks for counts, averages, frequencies, or patterns related to a specific practitioner (e.g., \"How many of *my* patients have diabetes?\"). This could be compared to the overall average.\r\n    -   The query asks about a practitioner's own common treatments or prescriptions (e.g., \"What medication do *I* most often prescribe for hypertension?\"). This could be compared to what all practitioners prescribe.\r\n-   **When NOT to suggest augmentation (\"should_augment: false\"):**\r\n    -   The query is about a single, specific patient's record (e.g., \"List all conditions for Jane Doe.\"). Broader data is not relevant to this specific request.\r\n    -   The query is a simple lookup that doesn't imply a need for comparison.\r\n\r\nIf you suggest augmenting the query, you must generate a new \"suggested_cypher\" that performs this broader, comparative analysis. This usually involves removing a \"MATCH\" clause that filters by a specific patient or practitioner to analyze the entire dataset.\r\n\r\nYour response MUST be a single, raw JSON object.\r\n\r\n---\r\n**1. Graph Schema:**\r\n*   **Node Labels and Properties:**\r\n    *   \"Patient\": \"id\"(STRING), \"name\"(STRING)\r\n    *   \"Encounter\": \"id\"(STRING), \"period_start\"(DATETIME)\r\n    *   \"Condition\": \"id\"(STRING), \"code_text\"(STRING)\r\n    *   \"Observation\": \"id\"(STRING), \"code_text\"(STRING), \"value\"(STRING)\r\n    *   \"Practitioner\": \"id\"(STRING), \"name\"(STRING)\r\n    *   \"MedicationRequest\": \"id\"(STRING), \"medication\"(STRING)\r\n*   **Relationships:**\r\n    *   \"(:Patient)-[:HAS_CONDITION]->(:Condition)\"\r\n    *   \"(:Patient)-[:HAD_ENCOUNTER]->(:Encounter)\"\r\n    *   \"(:Patient)-[:PRESCRIBED_MEDICATION]->(:MedicationRequest)\"\r\n    *   \"(:Encounter)-[:ATTENDED_BY]->(:Practitioner)\"\r\n    *   \"(:Condition)-[:DIAGNOSED_DURING]->(:Encounter)\"\r\n    *   \"(:Observation)-[:MEASURED_DURING]->(:Encounter)\"\r\n\r\n---\r\n**2. Output Schema:**\r\n{\r\n  \"should_augment\": boolean,\r\n  \"suggested_cypher\": \"string or null\"\r\n}\r\n\r\n---\r\n**3. Examples:**\r\n\r\n**Example 1 (Augmentation Needed):**\r\n*   **User Query Summary:** \"Find the most common medication prescribed for 'Hypertension' by the practitioner named 'Dr. John Doe'.\"\r\n*   **Executed Cypher:**\r\n    \"\"\"cypher\r\n    MATCH (pr:Practitioner {name: 'Dr. John Doe'})<-[:ATTENDED_BY]-(e:Encounter)<-[:DIAGNOSED_DURING]-(c:Condition {code_text: 'Hypertension'}),\r\n          (p:Patient)-[:PRESCRIBED_MEDICATION]->(mr:MedicationRequest),\r\n          (p)-[:HAD_ENCOUNTER]->(e)\r\n    RETURN mr.medication AS Medication, count(mr) AS Frequency\r\n    ORDER BY Frequency DESC\r\n    LIMIT 5\r\n    \"\"\"\r\n*   **Your JSON Output:**\r\n    \"\"\"json\r\n    {\r\n      \"should_augment\": true,\r\n      \"suggested_cypher\": \"MATCH (c:Condition {code_text: 'Hypertension'})<-[:DIAGNOSED_DURING]-(e:Encounter), (p:Patient)-[:PRESCRIBED_MEDICATION]->(mr:MedicationRequest), (p)-[:HAD_ENCOUNTER]->(e) RETURN mr.medication AS Medication, count(mr) AS Frequency ORDER BY Frequency DESC LIMIT 5\"\r\n    }\r\n    \"\"\"\r\n\r\n**Example 2 (No Augmentation Needed):**\r\n*   **User Query Summary:** \"Find all conditions for the patient named 'Annamarie Hane'.\"\r\n*   **Executed Cypher:**\r\n    \"\"\"cypher\r\n    MATCH (p:Patient {name: 'Annamarie Hane'})-[:HAS_CONDITION]->(c:Condition) RETURN c.code_text AS Condition, c.onsetDateTime AS DiagnosisDate\r\n    \"\"\"\r\n*   **Your JSON Output:**\r\n    \"\"\"json\r\n    {\r\n      \"should_augment\": false,\r\n      \"suggested_cypher\": null\r\n    }\r\n    \"\"\"\r\n\r\n**Example 3 (Augmentation Needed - Statistical):**\r\n*   **User Query Summary:** \"Count the number of patients assigned to 'Dr. Jane Smith' who have the condition 'Diabetes'.\"\r\n*   **Executed Cypher:**\r\n    \"\"\"cypher\r\n    MATCH (pr:Practitioner {name: 'Dr. Jane Smith'})<-[:ATTENDED_BY]-(e)<-[:HAD_ENCOUNTER]-(p:Patient)-[:HAS_CONDITION]->(c:Condition {code_text: 'Diabetes'})\r\n    RETURN count(DISTINCT p) AS NumberOfPatients\r\n    \"\"\"\r\n*   **Your JSON Output:**\r\n    \"\"\"json\r\n    {\r\n      \"should_augment\": true,\r\n      \"suggested_cypher\": \"MATCH (p:Patient)-[:HAS_CONDITION]->(c:Condition {code_text: 'Diabetes'}) WITH count(DISTINCT p) AS DiabeticPatients MATCH (total_p:Patient) WITH DiabeticPatients, count(total_p) AS TotalPatients RETURN DiabeticPatients, TotalPatients, (toFloat(DiabeticPatients) \/ TotalPatients) * 100 AS Percentage\"\r\n    }\r\n    \"\"\"\r\n---\r\n**4. Task:**\r\nAnalyze the following inputs and generate your JSON response.\r\n\r\n**User Query Summary:** \" ${summarized_user_query} \"\r\n\r\n**Executed Cypher:**\r\n\"\"\"cypher\r\n ${executed_cypher}\r\n\"\"\"
+  `
+  if (input.qryGenerated) {
+    const response = await ai.models.generateContent({
+      model: "gemini-2.5-flash",
+      contents: metaAnalysisPrompt,
+      config: {
+        responseMimeType: "application/json",
+        responseJsonSchema: {
+          "$schema": "http://json-schema.org/draft-07/schema#",
+          "title": "Query Augmentation Suggestion",
+          "description": "Defines the output for the meta-analysis prompt, which suggests whether a query could be augmented with broader data and provides a new Cypher query if so.",
+          "type": "object",
+          "properties": {
+            "should_augment": {
+              "description": "A boolean flag that is true if the analysis suggests the query would benefit from being compared against the entire dataset.",
+              "type": "boolean"
+            },
+            "suggested_cypher": {
+              "description": "If should_augment is true, this contains a new, complete Cypher query string for a broader, comparative analysis. If false, this is null.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "should_augment",
+            "suggested_cypher"
+          ],
+          "additionalProperties": false
+        }
+      }
+    });
+    metaAnalysisResult.meta = JSON.parse(response.text)
+  }
+
+  console.log("Returning generated Cypher query:", JSON.stringify(metaAnalysisResult, null, 2));
+  return metaAnalysisResult;
+};
+
+/**
+ * Activity 4: Creates an audit log of the operation.
  * It receives the output from the `generateCypher` activity.
  */
 const createAuditLog = async (ctx, input) => {
@@ -159,8 +216,11 @@ const aiCypherQueryGeneratorWorkflow = async function* (ctx, input) {
     // Step 2: Call the Cypher generation activity, passing the result from step 1
     const cypherResult = yield ctx.callActivity(generateCypher, validationResult);
 
-    // Step 3: Call the audit log activity, passing the result from step 2
-    const auditResult = yield ctx.callActivity(createAuditLog, cypherResult);
+    // Step 2: Call the Cypher generation activity, passing the result from step 1
+    const metaAnalysisResult = yield ctx.callActivity(metaAnalysis, cypherResult);
+
+    // Step 4: Call the audit log activity, passing the result from step 2
+    const auditResult = yield ctx.callActivity(createAuditLog, metaAnalysisResult);
 
     console.log(`\n>>> Workflow finished successfully for instance ID: ${instanceId}`);
 
@@ -184,4 +244,5 @@ export {
   validateQuery,
   generateCypher,
   createAuditLog,
+  metaAnalysis
 };

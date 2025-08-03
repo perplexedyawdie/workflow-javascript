@@ -5,7 +5,8 @@ import {
   aiCypherQueryGeneratorWorkflow,
   createAuditLog,
   generateCypher,
-  validateQuery
+  validateQuery,
+  metaAnalysis
 } from './workflow.js';
 
 const app = express();
@@ -22,6 +23,7 @@ workflowRuntime
   .registerWorkflow(aiCypherQueryGeneratorWorkflow)
   .registerActivity(validateQuery)
   .registerActivity(generateCypher)
+  .registerActivity(metaAnalysis)
   .registerActivity(createAuditLog);
 
 (async () => {
